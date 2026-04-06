@@ -18,6 +18,17 @@ let reducedMotion = rmMQ.matches;
 rmMQ.addEventListener?.("change", (e) => (reducedMotion = e.matches));
 rmMQ.addListener?.((e) => (reducedMotion = e.matches));
 
+const pointerMQ = window.matchMedia("(pointer: coarse)");
+const isTouchDevice = pointerMQ.matches;
+const connection =
+  navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+const isLowEndDevice =
+  (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4) ||
+  (navigator.deviceMemory && navigator.deviceMemory <= 4) ||
+  !!connection?.saveData ||
+  /2g|3g/i.test(connection?.effectiveType || "");
+const shouldUseLightAnimations = isTouchDevice || isLowEndDevice;
+
 const has = (s) => !!nextPage.querySelector(s);
 
 let staggerDefault = 0.05;
@@ -25,6 +36,16 @@ let durationDefault = 0.6;
 
 CustomEase.create("osmo", "0.625, 0.05, 0, 1");
 gsap.defaults({ ease: "osmo", duration: durationDefault });
+gsap.config({
+  autoSleep: 60,
+});
+
+if (hasScrollTrigger) {
+  ScrollTrigger.config({
+    limitCallbacks: true,
+    ignoreMobileResize: true,
+  });
+}
 
 // -----------------------------------------
 // FUNCTION REGISTRY
@@ -86,6 +107,7 @@ function runPageOnceAnimation(next) {
     y: "-10rem",
     rotation: -8,
     transformOrigin: "50% 0%",
+    force3D: true,
   });
 
   tl.add("startEnter", 0.65);
@@ -99,6 +121,7 @@ function runPageOnceAnimation(next) {
       y: "0rem",
       duration: 0.7,
       ease: "back.out(2)",
+      force3D: true,
     },
     "startEnter"
   );
@@ -119,6 +142,7 @@ function runPageOnceAnimation(next) {
       rotation: 0,
       duration: 0.48,
       ease: "power1.out",
+      force3D: true,
     },
     "startEnter"
   );
@@ -138,6 +162,8 @@ function runPageLeaveAnimation(current, next) {
     },
   });
 
+  destroyInsideViews(current);
+
   if (reducedMotion) {
     return tl.set(current, { autoAlpha: 0 });
   }
@@ -148,6 +174,7 @@ function runPageLeaveAnimation(current, next) {
   if (!inner) {
     gsap.set(current, {
       transformOrigin: "50% 0%",
+      force3D: true,
     });
 
     tl.to(current, {
@@ -157,6 +184,7 @@ function runPageLeaveAnimation(current, next) {
       autoAlpha: 0,
       duration: 0.6,
       ease: "power1.out",
+      force3D: true,
     });
 
     return tl;
@@ -176,6 +204,7 @@ function runPageLeaveAnimation(current, next) {
     y: -scrollY,
     transformOrigin: "50% 0%",
     width: "100%",
+    force3D: true,
   });
 
   tl.to(inner, {
@@ -185,6 +214,7 @@ function runPageLeaveAnimation(current, next) {
     autoAlpha: 0,
     duration: 0.6,
     ease: "power1.out",
+    force3D: true,
   });
 
   return tl;
@@ -208,6 +238,7 @@ function runPageEnterAnimation(next) {
     y: "-10rem",
     rotation: -8,
     transformOrigin: "50% 0%",
+    force3D: true,
   });
 
   tl.add("startEnter", 0.65);
@@ -226,6 +257,7 @@ function runPageEnterAnimation(next) {
       y: "0rem",
       duration: 0.7,
       ease: "back.out(2)",
+      force3D: true,
     },
     "startEnter"
   );
@@ -246,6 +278,7 @@ function runPageEnterAnimation(next) {
       rotation: 0,
       duration: 0.48,
       ease: "power1.out",
+      force3D: true,
     },
     "startEnter"
   );
@@ -305,7 +338,7 @@ barba.hooks.afterEnter((data) => {
 });
 
 barba.init({
-  debug: true, // Set to 'false' in production
+  debug: false,
   timeout: 7000,
   preventRunning: true,
   transitions: [
@@ -372,8 +405,9 @@ function initLenis() {
   if (!hasLenis) return;
 
   lenis = new Lenis({
-    lerp: 0.165,
-    wheelMultiplier: 1.25,
+    lerp: shouldUseLightAnimations ? 0.14 : 0.165,
+    wheelMultiplier: shouldUseLightAnimations ? 1.05 : 1.25,
+    touchMultiplier: shouldUseLightAnimations ? 1 : 1.2,
   });
 
   if (hasScrollTrigger) {
@@ -557,15 +591,31 @@ function initHeadingMarquee(scope = nextPage, immediate = false) {
   });
 }
 
+function destroyInsideViews(scope = document) {
+  const sections = scope.querySelectorAll("[data-insideviews]");
+
+  sections.forEach((section) => {
+    if (typeof section._insideviewsDestroy === "function") {
+      section._insideviewsDestroy();
+      delete section._insideviewsDestroy;
+    }
+  });
+}
+
 function initInsideViewsInfinite(scope = nextPage) {
   const sections = scope.querySelectorAll("[data-insideviews]");
+  const imageUpdateInterval = shouldUseLightAnimations ? 90 : 45;
+  const velocityFriction = shouldUseLightAnimations ? 0.92 : 0.95;
+  const wheelStrength = shouldUseLightAnimations ? 0.85 : 1.1;
+  const lerpStrength = shouldUseLightAnimations ? 0.12 : 0.14;
 
   sections.forEach((section) => {
     const viewport = section.querySelector(".insideviews-viewport");
     const track = section.querySelector(".insideviews-track");
     const firstSet = section.querySelector(".insideviews-set");
+    const items = Array.from(section.querySelectorAll(".insideviews-item"));
 
-    if (!viewport || !track || !firstSet) return;
+    if (!viewport || !track || !firstSet || !items.length) return;
     if (section.dataset.insideviewsInitialized === "true") return;
     section.dataset.insideviewsInitialized = "true";
 
@@ -573,12 +623,19 @@ function initInsideViewsInfinite(scope = nextPage) {
     let targetX = 0;
     let velocity = 0;
     let isPointerInside = false;
+    let isIdle = false;
+    let lastWrappedX = 0;
+    let lastImageUpdateAt = 0;
+    let loopWidth = Math.max(firstSet.offsetWidth, 1);
+    let resizeObserver = null;
 
-    const getLoopWidth = () => firstSet.offsetWidth;
+    const updateLoopWidth = () => {
+      loopWidth = Math.max(firstSet.offsetWidth, 1);
+      isIdle = false;
+    };
 
     const updateImages = () => {
       const viewportRect = viewport.getBoundingClientRect();
-      const items = section.querySelectorAll(".insideviews-item");
       const edgeZone = viewportRect.width * 0.18;
 
       items.forEach((item) => {
@@ -610,9 +667,11 @@ function initInsideViewsInfinite(scope = nextPage) {
           );
         }
 
-        gsap.set(item, {
-          height: `${targetHeight}vh`,
-        });
+        const roundedHeight = Math.round(targetHeight * 10) / 10;
+        if (item.dataset.insideviewsHeight !== String(roundedHeight)) {
+          item.dataset.insideviewsHeight = String(roundedHeight);
+          item.style.height = `${roundedHeight}vh`;
+        }
       });
     };
 
@@ -620,45 +679,78 @@ function initInsideViewsInfinite(scope = nextPage) {
       if (!isPointerInside) return;
       e.preventDefault();
 
-      velocity += e.deltaY * 1.1;
+      velocity += e.deltaY * wheelStrength;
+      isIdle = false;
     };
 
     const tick = () => {
-      velocity *= 0.95;
+      velocity *= velocityFriction;
       targetX -= velocity * 0.04;
-      currentX += (targetX - currentX) * 0.14;
+      currentX += (targetX - currentX) * lerpStrength;
 
-      const loopWidth = getLoopWidth();
       const wrappedX = gsap.utils.wrap(-loopWidth, 0, currentX);
+      const isMoving =
+        Math.abs(velocity) > 0.02 ||
+        Math.abs(targetX - currentX) > 0.05 ||
+        Math.abs(wrappedX - lastWrappedX) > 0.05;
+
+      if (!isMoving && isIdle) {
+        return;
+      }
 
       gsap.set(track, { x: wrappedX });
-      updateImages();
+      lastWrappedX = wrappedX;
+
+      const now = performance.now();
+      if (
+        lastImageUpdateAt === 0 ||
+        now - lastImageUpdateAt >= imageUpdateInterval
+      ) {
+        updateImages();
+        lastImageUpdateAt = now;
+      }
+
+      isIdle = !isMoving;
     };
 
-    viewport.addEventListener("mouseenter", () => {
+    const onMouseEnter = () => {
       isPointerInside = true;
-    });
+    };
 
-    viewport.addEventListener("mouseleave", () => {
+    const onMouseLeave = () => {
       isPointerInside = false;
-    });
+    };
 
+    const onResize = debounceOnWidthChange(() => {
+      updateLoopWidth();
+      updateImages();
+    }, 120);
+
+    viewport.addEventListener("mouseenter", onMouseEnter);
+    viewport.addEventListener("mouseleave", onMouseLeave);
     viewport.addEventListener("wheel", onWheel, { passive: false });
 
     gsap.ticker.add(tick);
-
-    const onResize = () => {
-      updateImages();
-    };
-
     window.addEventListener("resize", onResize);
 
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(() => {
+        updateLoopWidth();
+      });
+      resizeObserver.observe(firstSet);
+      resizeObserver.observe(viewport);
+    }
+
     section._insideviewsDestroy = () => {
+      viewport.removeEventListener("mouseenter", onMouseEnter);
+      viewport.removeEventListener("mouseleave", onMouseLeave);
       viewport.removeEventListener("wheel", onWheel);
       window.removeEventListener("resize", onResize);
       gsap.ticker.remove(tick);
+      resizeObserver?.disconnect();
     };
 
+    updateLoopWidth();
     updateImages();
   });
 }
@@ -687,6 +779,7 @@ function initHeadingMetaAnimation(scope = nextPage) {
       opacity: 0,
       x: "0.75rem",
       willChange: "opacity, transform",
+      force3D: true,
     });
 
     if (type === "heading") {
@@ -706,6 +799,7 @@ function initHeadingMetaAnimation(scope = nextPage) {
       x: "3rem",
       transformOrigin: "left center",
       willChange: "transform",
+      force3D: true,
     });
 
     el.dataset.dividerAnimationInitialized = "true";
@@ -741,7 +835,18 @@ function initHeadingMetaAnimation(scope = nextPage) {
       setupDivider(divider);
     }
 
-    const tl = gsap.timeline({ paused: true });
+    const cleanupTargets = [...headingSplit.chars];
+    if (metaSplit) {
+      cleanupTargets.push(...metaSplit.chars);
+    }
+    if (divider) {
+      cleanupTargets.push(divider);
+    }
+
+    const tl = gsap.timeline({
+      paused: true,
+      onComplete: () => gsap.set(cleanupTargets, { clearProps: "willChange" }),
+    });
 
     tl.to(
       headingSplit.chars,
@@ -749,7 +854,7 @@ function initHeadingMetaAnimation(scope = nextPage) {
         opacity: 1,
         x: "0rem",
         duration: 0.4,
-        stagger: 0.05,
+        stagger: shouldUseLightAnimations ? 0.035 : 0.05,
         ease: "sine.out",
       },
       startAt
@@ -762,7 +867,7 @@ function initHeadingMetaAnimation(scope = nextPage) {
           opacity: 1,
           x: "0rem",
           duration: 0.4,
-          stagger: 0.06,
+          stagger: shouldUseLightAnimations ? 0.04 : 0.06,
           ease: "sine.out",
         },
         startAt
@@ -799,7 +904,10 @@ function initHeadingMetaAnimation(scope = nextPage) {
     const startAt = getStartAt(meta);
     const metaSplit = setupSplitText(meta, "meta");
 
-    const tl = gsap.timeline({ paused: true });
+    const tl = gsap.timeline({
+      paused: true,
+      onComplete: () => gsap.set(metaSplit.chars, { clearProps: "willChange" }),
+    });
 
     tl.to(
       metaSplit.chars,
@@ -807,7 +915,7 @@ function initHeadingMetaAnimation(scope = nextPage) {
         opacity: 1,
         x: "0rem",
         duration: 0.4,
-        stagger: 0.06,
+        stagger: shouldUseLightAnimations ? 0.04 : 0.06,
         ease: "sine.out",
       },
       startAt
@@ -831,7 +939,10 @@ function initHeadingMetaAnimation(scope = nextPage) {
 
     setupDivider(divider);
 
-    const tl = gsap.timeline({ paused: true });
+    const tl = gsap.timeline({
+      paused: true,
+      onComplete: () => gsap.set(divider, { clearProps: "willChange" }),
+    });
 
     tl.to(
       divider,
@@ -899,6 +1010,7 @@ function initHeroHeadingMetaAnimation(scope = nextPage, immediate = false) {
         opacity: 0,
         x: "0.75rem",
         willChange: "opacity, transform",
+        force3D: true,
       });
 
       headingSplits.push(split);
@@ -923,6 +1035,7 @@ function initHeroHeadingMetaAnimation(scope = nextPage, immediate = false) {
         opacity: 0,
         x: "0.3rem",
         willChange: "opacity, transform",
+        force3D: true,
       });
     }
 
@@ -931,10 +1044,23 @@ function initHeroHeadingMetaAnimation(scope = nextPage, immediate = false) {
         width: "0%",
         x: "3rem",
         willChange: "width, transform",
+        force3D: true,
       });
     }
 
-    const tl = gsap.timeline({ paused: true });
+    const cleanupTargets = [];
+    headingSplits.forEach((split) => cleanupTargets.push(...split.chars));
+    if (metaSplit) {
+      cleanupTargets.push(...metaSplit.chars);
+    }
+    if (dividers.length) {
+      cleanupTargets.push(...dividers);
+    }
+
+    const tl = gsap.timeline({
+      paused: true,
+      onComplete: () => gsap.set(cleanupTargets, { clearProps: "willChange" }),
+    });
 
     headingSplits.forEach((split) => {
       tl.to(
@@ -943,7 +1069,7 @@ function initHeroHeadingMetaAnimation(scope = nextPage, immediate = false) {
           opacity: 1,
           x: "0rem",
           duration: 0.6,
-          stagger: 0.08,
+          stagger: shouldUseLightAnimations ? 0.05 : 0.08,
           ease: "sine.out",
         },
         startAt
@@ -957,7 +1083,7 @@ function initHeroHeadingMetaAnimation(scope = nextPage, immediate = false) {
           opacity: 1,
           x: "0rem",
           duration: 0.12,
-          stagger: 0.017,
+          stagger: shouldUseLightAnimations ? 0.012 : 0.017,
           ease: "sine.out",
         },
         startAt
